@@ -6,83 +6,60 @@ import yt_dlp
 import requests
 import time
 import json
-import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
-
-# Install dependencies
-def install_dependencies():
-    dependencies = ['streamlit', 'yt-dlp', 'streamlit-autorefresh', 'requests']
-    for dep in dependencies:
-        try:
-            if dep == 'streamlit':
-                import streamlit as st
-            elif dep == 'yt-dlp':
-                import yt_dlp
-            elif dep == 'streamlit-autorefresh':
-                from streamlit_autorefresh import st_autorefresh
-            elif dep == 'requests':
-                import requests
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", dep])
-
-install_dependencies()
-
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+import streamlit.components.v1 as components
+import atexit
 
-# Variabel global untuk status
-if 'streaming_status' not in st.session_state:
-    st.session_state.streaming_status = "stopped"
+# Versi: Streamlit Cloud Fix
+st.set_page_config(
+    page_title="YouTube Live Streamer",
+    page_icon="🎥",
+    layout="wide"
+)
+
+# Install missing packages
+def install_packages():
+    try:
+        import yt_dlp
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp"])
+    
+    try:
+        from streamlit_autorefresh import st_autorefresh
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit-autorefresh"])
+
+install_packages()
+
+# Inisialisasi session state
+if 'streaming' not in st.session_state:
+    st.session_state.streaming = False
 if 'ffmpeg_process' not in st.session_state:
     st.session_state.ffmpeg_process = None
 if 'logs' not in st.session_state:
     st.session_state.logs = []
+if 'stream_key' not in st.session_state:
+    st.session_state.stream_key = ""
+if 'youtube_url' not in st.session_state:
+    st.session_state.youtube_url = ""
 
 def log_message(msg):
-    """Simpan log dengan timestamp"""
+    """Simpan log"""
     timestamp = time.strftime("%H:%M:%S")
     log_entry = f"[{timestamp}] {msg}"
     st.session_state.logs.append(log_entry)
-    if len(st.session_state.logs) > 50:  # Batasi log
-        st.session_state.logs = st.session_state.logs[-50:]
+    print(log_entry)  # Juga print ke console
 
-def check_ffmpeg():
-    """Cek apakah FFmpeg tersedia"""
+def extract_hls_url(youtube_url):
+    """Extract HLS URL dari YouTube"""
     try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-        return result.returncode == 0
-    except:
-        return False
-
-def install_ffmpeg_streamlit():
-    """Install FFmpeg di environment Streamlit (untuk Cloud)"""
-    log_message("🔧 Mencoba menginstall FFmpeg...")
-    try:
-        # Untuk Streamlit Cloud (Ubuntu based)
-        subprocess.run(['apt-get', 'update'], capture_output=True)
-        subprocess.run(['apt-get', 'install', '-y', 'ffmpeg'], capture_output=True)
-        log_message("✅ FFmpeg berhasil diinstall")
-        return True
-    except Exception as e:
-        log_message(f"❌ Gagal install FFmpeg: {e}")
-        return False
-
-def extract_youtube_hls(youtube_url):
-    """Extract HLS URL dari YouTube dengan metode alternatif"""
-    log_message(f"📥 Mengekstrak HLS dari: {youtube_url}")
-    
-    try:
-        # Metode 1: Gunakan yt-dlp
+        log_message(f"🔍 Mengekstrak HLS dari: {youtube_url}")
+        
         ydl_opts = {
             'format': 'best[ext=m3u8]/best',
             'quiet': True,
             'no_warnings': True,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web'],
-                    'skip': ['dash', 'hls']
-                }
-            },
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
@@ -92,159 +69,65 @@ def extract_youtube_hls(youtube_url):
             info = ydl.extract_info(youtube_url, download=False)
             
             # Cari URL HLS
-            hls_url = None
-            if 'url' in info:
-                if 'm3u8' in info['url']:
-                    hls_url = info['url']
+            if 'url' in info and 'm3u8' in info['url']:
+                return info['url']
             
-            if not hls_url:
-                for fmt in info.get('formats', []):
-                    url = fmt.get('url', '')
-                    if url and 'm3u8' in url:
-                        hls_url = url
-                        break
+            for fmt in info.get('formats', []):
+                url = fmt.get('url', '')
+                if url and 'm3u8' in url:
+                    return url
             
-            if hls_url:
-                log_message(f"✅ HLS ditemukan: {hls_url[:100]}...")
-                
-                # Simpan ke file untuk testing
-                try:
-                    response = requests.get(hls_url, timeout=10)
-                    if response.status_code == 200:
-                        with open('stream.m3u8', 'w') as f:
-                            f.write(response.text)
-                        log_message("✅ File M3U8 berhasil disimpan")
-                except:
-                    pass
-                
-                return hls_url
-            else:
-                log_message("❌ HLS tidak ditemukan")
-                return None
-                
+        return None
     except Exception as e:
         log_message(f"❌ Error ekstraksi: {str(e)}")
-        
-        # Metode alternatif: Gunakan API sederhana
-        try:
-            log_message("🔄 Mencoba metode alternatif...")
-            
-            # API alternatif untuk extract HLS
-            api_url = f"https://yt.lemnoslife.com/noKey/videos?part=streamingDetails&id={youtube_url.split('v=')[-1]}"
-            response = requests.get(api_url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if 'items' in data and data['items']:
-                    streaming_data = data['items'][0].get('streamingDetails', {})
-                    
-                    # Cari format HLS
-                    if 'adaptiveFormats' in streaming_data:
-                        for fmt in streaming_data['adaptiveFormats']:
-                            if fmt.get('type', '').startswith('video/mp4') and 'url' in fmt:
-                                return fmt['url']
-        except Exception as e2:
-            log_message(f"❌ Metode alternatif gagal: {e2}")
-        
         return None
 
-def test_rtmp_connection(stream_key):
-    """Test koneksi ke RTMP YouTube"""
-    log_message("🔍 Testing koneksi RTMP...")
-    
-    test_cmd = [
-        'ffmpeg',
-        '-f', 'lavfi',
-        '-i', 'testsrc=duration=5:size=1280x720:rate=30',
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-t', '3',  # Hanya 3 detik untuk testing
-        '-f', 'flv',
-        f'rtmp://a.rtmp.youtube.com/live2/{stream_key}'
-    ]
-    
+def start_streaming_thread(youtube_url, stream_key, is_shorts):
+    """Thread untuk memulai streaming"""
     try:
-        process = subprocess.Popen(
-            test_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
+        log_message("🔄 Memulai proses streaming...")
         
-        output = []
-        for line in process.stdout:
-            if 'error' in line.lower() or 'failed' in line.lower():
-                log_message(f"⚠️ RTMP Error: {line.strip()}")
-            output.append(line.strip())
+        # Extract HLS URL
+        hls_url = extract_hls_url(youtube_url)
+        if not hls_url:
+            st.error("❌ Gagal mendapatkan link HLS")
+            st.session_state.streaming = False
+            return
         
-        process.wait(timeout=10)
+        log_message(f"✅ HLS URL ditemukan: {hls_url[:80]}...")
         
-        if process.returncode == 0:
-            log_message("✅ Koneksi RTMP berhasil diuji")
-            return True
+        # Persiapan output URL
+        output_url = f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
+        
+        # Pilih scale filter
+        if is_shorts:
+            scale = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
         else:
-            log_message("❌ Koneksi RTMP gagal")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        process.kill()
-        log_message("⚠️ Timeout saat testing RTMP")
-        return True  # Return True karena timeout mungkin berarti terhubung
-    except Exception as e:
-        log_message(f"❌ Error testing RTMP: {e}")
-        return False
-
-def start_streaming(youtube_url, stream_key, is_shorts):
-    """Mulai streaming dari YouTube HLS"""
-    log_message("🚀 Memulai streaming...")
-    
-    # 1. Ekstrak HLS URL
-    hls_url = extract_youtube_hls(youtube_url)
-    if not hls_url:
-        st.error("❌ Gagal mendapatkan link HLS dari YouTube")
-        st.session_state.streaming_status = "error"
-        return
-    
-    # 2. Test koneksi RTMP
-    if not test_rtmp_connection(stream_key):
-        st.warning("⚠️ RTMP connection test failed. Trying anyway...")
-    
-    # 3. Siapkan command FFmpeg
-    output_url = f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
-    
-    # Parameter untuk YouTube Live
-    if is_shorts:
-        scale_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2"
-    else:
-        scale_filter = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2"
-    
-    # Optimasi untuk streaming HLS
-    cmd = [
-        'ffmpeg',
-        '-reconnect', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '5',
-        '-i', hls_url,
-        '-vf', scale_filter,
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',  # Gunakan ultrafast untuk resource rendah
-        '-tune', 'zerolatency',
-        '-b:v', '1500k',  # Bitrate lebih rendah untuk stabilitas
-        '-maxrate', '1500k',
-        '-bufsize', '3000k',
-        '-g', '50',
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
-        '-f', 'flv',
-        output_url
-    ]
-    
-    log_message(f"📡 Command: {' '.join(cmd)}")
-    
-    try:
-        # Jalankan FFmpeg dalam thread
+            scale = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2"
+        
+        # Build FFmpeg command
+        cmd = [
+            'ffmpeg',
+            '-re',
+            '-i', hls_url,
+            '-vf', scale,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-tune', 'zerolatency',
+            '-b:v', '2000k',
+            '-maxrate', '2000k',
+            '-bufsize', '4000k',
+            '-g', '50',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-f', 'flv',
+            output_url
+        ]
+        
+        log_message(f"🚀 Menjalankan FFmpeg: {' '.join(cmd[:6])}...")
+        
+        # Jalankan FFmpeg
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -255,281 +138,247 @@ def start_streaming(youtube_url, stream_key, is_shorts):
         )
         
         st.session_state.ffmpeg_process = process
-        st.session_state.streaming_status = "streaming"
-        log_message("✅ Streaming dimulai!")
+        st.session_state.streaming = True
         
-        # Baca output secara real-time
-        def read_output():
-            while True:
-                if process.stdout:
-                    line = process.stdout.readline()
-                    if line:
-                        log_message(line.strip())
-                    else:
-                        break
-                time.sleep(0.1)
+        # Baca output
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                log_message(f"FFmpeg: {line.strip()}")
         
-        # Thread untuk membaca output
-        output_thread = threading.Thread(target=read_output, daemon=True)
-        output_thread.start()
+        process.wait()
+        return_code = process.returncode
         
-        # Tunggu proses selesai
-        while True:
-            if process.poll() is not None:
-                break
-            time.sleep(1)
+        log_message(f"FFmpeg exited with code: {return_code}")
         
-        # Cek exit code
-        if process.returncode == 0:
-            log_message("✅ Streaming selesai dengan sukses")
+        if return_code == 0:
+            log_message("✅ Streaming selesai")
         else:
-            log_message(f"⚠️ Streaming berhenti dengan code: {process.returncode}")
-        
-        st.session_state.streaming_status = "stopped"
+            log_message("⚠️ Streaming terhenti")
+            
+        st.session_state.streaming = False
+        st.session_state.ffmpeg_process = None
         
     except Exception as e:
-        log_message(f"❌ Error streaming: {str(e)}")
-        st.session_state.streaming_status = "error"
+        log_message(f"❌ Error dalam thread: {str(e)}")
+        st.session_state.streaming = False
+        st.session_state.ffmpeg_process = None
 
 def stop_streaming():
     """Hentikan streaming"""
-    log_message("🛑 Menghentikan streaming...")
-    
     if st.session_state.ffmpeg_process:
         try:
             st.session_state.ffmpeg_process.terminate()
             time.sleep(1)
-            
             if st.session_state.ffmpeg_process.poll() is None:
                 st.session_state.ffmpeg_process.kill()
-            
-            log_message("✅ Streaming dihentikan")
+            log_message("🛑 Streaming dihentikan")
         except:
             pass
     
-    st.session_state.streaming_status = "stopped"
+    st.session_state.streaming = False
     st.session_state.ffmpeg_process = None
 
+# Cleanup saat app berhenti
+def cleanup():
+    if st.session_state.ffmpeg_process:
+        stop_streaming()
+
+atexit.register(cleanup)
+
 def main():
-    st.set_page_config(
-        page_title="YouTube Live Streamer",
-        page_icon="🎥",
-        layout="wide"
-    )
-    
-    st.title("🎥 YouTube Live Streamer (Cloud Edition)")
+    st.title("🎥 YouTube Live Streamer")
     st.markdown("---")
     
-    # Auto refresh setiap 5 detik
-    st_autorefresh(interval=5000, key="stream_refresh")
+    # Auto refresh
+    st_autorefresh(interval=3000, key="data_refresh")
     
-    # Sidebar untuk kontrol
+    # Sidebar
     with st.sidebar:
         st.header("⚙️ Konfigurasi")
         
-        # Cek FFmpeg
-        if not check_ffmpeg():
-            st.warning("⚠️ FFmpeg tidak ditemukan!")
-            if st.button("🔧 Install FFmpeg"):
-                with st.spinner("Menginstall FFmpeg..."):
-                    if install_ffmpeg_streamlit():
-                        st.success("✅ FFmpeg terinstall!")
-                        st.rerun()
-                    else:
-                        st.error("❌ Gagal install FFmpeg")
-        
-        # Input stream key
+        # Stream Key
         stream_key = st.text_input(
             "🔑 YouTube Stream Key",
             value="gqz2-2uus-yyhv-srkd-ay8g",
-            type="password"
+            type="password",
+            key="stream_key_input"
         )
         
-        # Mode shorts
-        is_shorts = st.checkbox("📱 Mode Shorts (Vertical 9:16)", value=False)
+        st.session_state.stream_key = stream_key
+        
+        # Mode
+        is_shorts = st.checkbox("📱 Mode Shorts (Vertical)", value=False)
         
         st.markdown("---")
         
-        # Status streaming
-        status_color = {
-            "stopped": "gray",
-            "streaming": "green",
-            "error": "red"
-        }.get(st.session_state.streaming_status, "gray")
+        # Status
+        status = "🔴 LIVE" if st.session_state.streaming else "⏸️ STOPPED"
+        color = "red" if st.session_state.streaming else "gray"
         
         st.markdown(f"""
-        **Status:** <span style='color:{status_color};font-weight:bold'>
-        {st.session_state.streaming_status.upper()}
-        </span>
+        <div style='background-color:#f0f2f6;padding:10px;border-radius:5px'>
+            <h4 style='color:{color};margin:0'>Status: {status}</h4>
+        </div>
         """, unsafe_allow_html=True)
         
         st.markdown("---")
         
-        # Tombol kontrol
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Refresh Status", use_container_width=True):
-                st.rerun()
-        with col2:
-            if st.button("🧹 Clear Logs", use_container_width=True):
-                st.session_state.logs = []
-                st.rerun()
+        # Info
+        st.info("""
+        **Cara Penggunaan:**
+        1. Masukkan Stream Key dari YouTube Studio
+        2. Masukkan URL YouTube Live
+        3. Klik START STREAMING
+        4. Pantau di YouTube Studio > Live Dashboard
+        """)
     
-    # Main content area
-    tab1, tab2, tab3 = st.tabs(["📡 Streaming", "🔗 Test URL", "📋 Logs"])
+    # Tabs utama
+    tab1, tab2 = st.tabs(["📡 Streaming", "📋 Logs"])
     
     with tab1:
-        st.header("Mulai Streaming")
+        st.header("Streaming Control")
         
-        # URL input
+        # URL Input
         youtube_url = st.text_input(
             "📺 YouTube Live URL",
             value="https://www.youtube.com/live/uN9pBrS7EaQ",
-            placeholder="https://www.youtube.com/live/... atau https://youtu.be/..."
+            placeholder="https://www.youtube.com/live/...",
+            key="youtube_url_input"
         )
         
-        col1, col2, col3 = st.columns([2, 1, 1])
+        st.session_state.youtube_url = youtube_url
+        
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            if st.button("🚀 START STREAMING", type="primary", use_container_width=True):
-                if not youtube_url or not stream_key:
-                    st.error("❌ URL dan Stream Key harus diisi!")
-                elif st.session_state.streaming_status == "streaming":
-                    st.warning("⚠️ Streaming sedang berjalan!")
+            start_disabled = st.session_state.streaming or not stream_key or not youtube_url
+            if st.button("🚀 START STREAMING", 
+                        type="primary", 
+                        disabled=start_disabled,
+                        use_container_width=True):
+                
+                if not stream_key:
+                    st.error("❌ Stream Key harus diisi!")
+                elif not youtube_url:
+                    st.error("❌ URL YouTube harus diisi!")
                 else:
-                    # Jalankan streaming dalam thread terpisah
-                    stream_thread = threading.Thread(
-                        target=start_streaming,
+                    # Start streaming dalam thread
+                    thread = threading.Thread(
+                        target=start_streaming_thread,
                         args=(youtube_url, stream_key, is_shorts),
                         daemon=True
                     )
-                    stream_thread.start()
-                    st.success("✅ Streaming dimulai dalam background!")
+                    thread.start()
+                    
+                    st.success("✅ Streaming dimulai! Lihat log untuk progress...")
+                    st.balloons()
+                    
+                    # Auto refresh untuk update status
                     st.rerun()
         
         with col2:
-            if st.button("🛑 STOP STREAMING", type="secondary", use_container_width=True):
+            if st.button("🛑 STOP STREAMING", 
+                        type="secondary",
+                        disabled=not st.session_state.streaming,
+                        use_container_width=True):
                 stop_streaming()
+                st.warning("⚠️ Menghentikan streaming...")
                 st.rerun()
         
         with col3:
-            if st.button("🔍 TEST CONNECTION", use_container_width=True):
-                if stream_key:
-                    with st.spinner("Testing koneksi..."):
-                        if test_rtmp_connection(stream_key):
-                            st.success("✅ Koneksi RTMP OK!")
-                        else:
-                            st.error("❌ Koneksi RTMP gagal")
+            if st.button("🔄 REFRESH", use_container_width=True):
+                st.rerun()
         
-        # Informasi streaming
+        # Status box
         st.markdown("---")
         
-        if st.session_state.streaming_status == "streaming":
-            st.success("""
-            **✅ LIVE STREAMING ACTIVE**
+        if st.session_state.streaming:
+            with st.container():
+                st.success("""
+                ### ✅ STREAMING AKTIF
+                
+                **Stream sedang berjalan ke YouTube Live**
+                
+                **URL Streaming:** `rtmp://a.rtmp.youtube.com/live2/******`
+                
+                **Sumber:** `{youtube_url}`
+                
+                **Mode:** `{'Shorts (720x1280)' if is_shorts else 'Landscape (1280x720)'}`
+                
+                **Status:** 🔴 **LIVE NOW**
+                """)
+                
+                # Progress indicator
+                progress_bar = st.progress(0)
+                for i in range(100):
+                    if not st.session_state.streaming:
+                        break
+                    time.sleep(0.1)
+                    progress_bar.progress(i + 1)
+                
+        else:
+            st.info("""
+            ### 📝 READY TO STREAM
             
-            Stream sedang berjalan ke YouTube Live.
+            **Status:** ⏸️ **STOPPED**
             
-            **Tips:**
-            1. Buka YouTube Studio untuk monitoring
-            2. Cek "Live Control Room" di YouTube
-            3. Streaming akan otomatis reconnect jika terputus
+            **Instruksi:**
+            1. Pastikan URL YouTube Live valid
+            2. Stream Key sudah diisi
+            3. Klik START STREAMING untuk mulai
             """)
-            
-            # Progress bar simulasi
-            placeholder = st.empty()
-            for seconds in range(0, 300, 5):
-                if st.session_state.streaming_status != "streaming":
-                    break
-                placeholder.progress(seconds / 300, text="Streaming in progress...")
-                time.sleep(5)
         
-        elif st.session_state.streaming_status == "error":
-            st.error("""
-            **❌ STREAMING ERROR**
+        # Quick test section
+        with st.expander("🔧 Quick Connection Test"):
+            if st.button("Test FFmpeg"):
+                try:
+                    result = subprocess.run(['ffmpeg', '-version'], 
+                                          capture_output=True, text=True)
+                    if result.returncode == 0:
+                        st.success("✅ FFmpeg tersedia")
+                        st.code(result.stdout[:200])
+                    else:
+                        st.error("❌ FFmpeg tidak tersedia")
+                except:
+                    st.error("❌ FFmpeg tidak terinstall")
             
-            Terjadi masalah saat streaming. Cek:
-            1. Stream key valid
-            2. URL YouTube Live benar
-            3. Koneksi internet stabil
-            """)
+            if st.button("Test HLS Extraction"):
+                if youtube_url:
+                    with st.spinner("Mengekstrak HLS..."):
+                        hls_url = extract_hls_url(youtube_url)
+                        if hls_url:
+                            st.success("✅ HLS ditemukan")
+                            st.code(hls_url[:200] + "...")
+                        else:
+                            st.error("❌ Gagal ekstrak HLS")
     
     with tab2:
-        st.header("Test URL HLS")
+        st.header("Streaming Logs")
         
-        test_url = st.text_input(
-            "Masukkan URL untuk test",
-            value="https://www.youtube.com/live/uN9pBrS7EaQ"
-        )
-        
-        if st.button("🔍 Extract HLS URL"):
-            if test_url:
-                with st.spinner("Mengekstrak HLS URL..."):
-                    hls_url = extract_youtube_hls(test_url)
-                    
-                    if hls_url:
-                        st.success("✅ HLS URL ditemukan!")
-                        
-                        # Tampilkan URL
-                        st.code(hls_url, language="text")
-                        
-                        # Download dan parse M3U8
-                        try:
-                            response = requests.get(hls_url, timeout=10)
-                            if response.status_code == 200:
-                                with st.expander("📝 Lihat Konten M3U8"):
-                                    st.text_area("M3U8 Content:", response.text[:2000], height=200)
-                        except Exception as e:
-                            st.warning(f"Tidak bisa fetch M3U8: {e}")
-                    else:
-                        st.error("❌ Gagal mengekstrak HLS URL")
-        
-        # Info tentang streaming
-        st.markdown("---")
-        st.info("""
-        **ℹ️ Tentang Cloud Streaming:**
-        
-        Streaming dari Streamlit Cloud memiliki batasan:
-        1. **CPU/Memory terbatas** - Gunakan preset ultrafast
-        2. **No RTMP outbound** - Beberapa region diblokir
-        3. **Timeout 5 menit** - Untuk proses background
-        
-        **Solusi Alternatif:**
-        - Gunakan VPS/RDP sendiri
-        - Gunakan layanan cloud dengan FFmpeg
-        - Stream dari local komputer
-        """)
-    
-    with tab3:
-        st.header("Log Streaming")
-        
-        # Tombol clear logs
-        if st.button("Clear Logs", key="clear_logs_tab"):
-            st.session_state.logs = []
-            st.rerun()
+        # Clear logs button
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            if st.button("Clear Logs", key="clear_logs"):
+                st.session_state.logs = []
+                st.rerun()
         
         # Display logs
-        log_container = st.container()
+        log_container = st.container(height=400)
         with log_container:
-            for log in reversed(st.session_state.logs[-20:]):  # Show last 20 logs
-                if "ERROR" in log or "❌" in log:
+            for log in st.session_state.logs[-20:]:
+                if "❌" in log or "ERROR" in log:
                     st.error(log)
-                elif "WARNING" in log or "⚠️" in log:
-                    st.warning(log)
-                elif "SUCCESS" in log or "✅" in log:
+                elif "✅" in log or "SUCCESS" in log:
                     st.success(log)
+                elif "⚠️" in log or "WARNING" in log:
+                    st.warning(log)
+                elif "🚀" in log or "🔍" in log:
+                    st.info(log)
                 else:
                     st.text(log)
         
-        # Download logs
-        if st.session_state.logs:
-            log_text = "\n".join(st.session_state.logs)
-            st.download_button(
-                label="📥 Download Logs",
-                data=log_text,
-                file_name="streaming_logs.txt",
-                mime="text/plain"
-            )
+        # Log count
+        st.caption(f"Total logs: {len(st.session_state.logs)}")
 
 if __name__ == "__main__":
     main()
