@@ -4,3 +4,4 @@ pytube
 playwright>=1.43.0
 yt-dlp
 requests
+streamlit_autorefresh
