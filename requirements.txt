@@ -2,4 +2,6 @@ streamlit
 ffmpeg-python
 pytube
 playwright>=1.43.0
-yt_dlp
+yt-dlp
+streamlit-autorefresh==0.1.0
+requests
